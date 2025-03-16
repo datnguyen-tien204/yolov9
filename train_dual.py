@@ -7,6 +7,7 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from torchinfo import summary
 
 import numpy as np
 import torch
@@ -107,7 +108,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     if pretrained:
         with torch_distributed_zero_first(LOCAL_RANK):
             weights = attempt_download(weights)  # download if not found locally
-        ckpt = torch.load(weights, map_location='cpu')  # load checkpoint to CPU to avoid CUDA memory leak
+        ckpt = torch.load(weights, map_location='cpu', weights_only=False)  # load checkpoint to CPU to avoid CUDA memory leak
         model = Model(cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
         exclude = ['anchor'] if (cfg or hyp.get('anchors')) and not resume else []  # exclude keys
         csd = ckpt['model'].float().state_dict()  # checkpoint state_dict as FP32
@@ -117,6 +118,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     else:
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
     amp = check_amp(model)  # check AMP
+	
 
     # Freeze
     freeze = [f'model.{x}.' for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # layers to freeze
@@ -135,6 +137,12 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     if RANK == -1 and batch_size == -1:  # single-GPU only, estimate best batch size
         batch_size = check_train_batch_size(model, imgsz, amp)
         loggers.on_params_update({"batch_size": batch_size})
+
+        
+        # In summary của model sử dụng torchinfo
+    if RANK in {-1, 0}:  # chỉ in summary trên rank 0 (trong trường hợp dùng multi-GPU)
+        LOGGER.info("Model Summary:")
+        LOGGER.info(str(summary(model, input_size=(1, 3, imgsz, imgsz), col_names=["input_size", "output_size", "num_params", "kernel_size"], verbose=1)))
 
     # Optimizer
     nbs = 64  # nominal batch size
@@ -243,6 +251,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # attach class weights
     model.names = names
 
+
+
+
     # Start training
     t0 = time.time()
     nb = len(train_loader)  # number of batches
@@ -262,6 +273,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 f'Starting training for {epochs} epochs...')
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         callbacks.run('on_train_epoch_start')
+
+        sample_batch = next(iter(train_loader))
+        input_data = sample_batch[0].to(device).float() / 255  # Chuẩn hóa như trong training
         model.train()
 
         # Update image weights (optional, single-GPU only)
